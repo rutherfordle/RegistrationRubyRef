@@ -1,0 +1,212 @@
+﻿Question #1 – Complete the basic code for the MVC
+
+USER MODEL (FOR REFERENCE) 
+	class User < ActiveRecord::Base
+	
+	#||Here it is allowed to have many referrals.||
+	has_many :sent_referrals, :class_name => 'Referral', :foreign_key => 'sender_id'
+	
+	#||foreign key 'sender_id' is in user database to track the user who made referrals.||
+	belongs_to :referral
+	accepts_nested_attributes_for :sent_referrals, :allow_destroy => true
+	attr_accessible :sent_referrals_attributes, :referral_token
+	
+	#||This allows only one unique referral ID.||
+	validates_uniqueness_of :referral_id, :unless => Proc.new{|user| user.referral_id.nil?}
+	def referral_token 
+		referral.invite_token if referral
+	end
+	def referral_token=(invite_token)
+		self.referral = Referral.find_by_invite_token(invite_token)
+	end
+end
+
+
+DATABASE STRUCTURE [COMPLETE THE DATABASE STRUCTURE] 
+
+#Added first_name, recipient_email and deliver_at
+create_table "refers", force: true do |t|
+    t.string   "first_name"
+    t.string   "recipient_email"
+    t.string   "invite_token"
+    t.datetime "created_at"
+    t.datetime "updated_at"
+    t.datetime "deliver_at"
+    
+    #Deliver_at to track when sent
+end
+add_index "referrals", ["invite_token"], :name => "index_referrals_on_invite_token", :unique => true
+#Unique named index added. Do not require any other index
+
+
+REFERRAL MODEL [COMPLETE THE MODEL] 
+# == Schema Information
+#
+# Table name: referrals
+#
+# id :integer not null, primary key
+# created_at :datetime not null
+# updated_at :datetime not null
+# invite_token :string(255)
+#
+class Referral < ActiveRecord::Base
+	
+	#||User class is specified here for mapping. Has one sender to this one recipient.||
+	belongs_to :sender, :class_name => ‘User’
+	has_one :recipient, :class_name => ‘User’
+	
+	#No further attr_accessible required unless timestamp for deliver_at
+	attr_accessible :invite_token, :recipient_email, :first_name, :deliver_at
+	
+	#Not entirely sure if it is validate or validates
+	#Add validation for presence of recipient_email
+	#Also added a validation for checking if recipient is registered already
+	validates :first_name, :recipient_email, presence: true
+	validates :recipient_is_not_registered
+	before_create { create_remember_token(:invite_token) }
+	
+	#interpretation of token generator under additional notes below
+
+private
+#||Not required, but here is the check for recipient registering more than once.||
+#Checks User table if email already exist and sends error message
+	def recipient_is_not_registered
+	  errors.add :recipient_email, 'registered already' if User.find_by_email(recipient_email)
+	end
+end
+
+
+REFERRAL CONTROLLER [COMPLETE THE CONTROLLER] 
+class ReferralsController < ApplicationController
+  def new
+  	
+  	#New method
+    @referral = Referral.new
+    #Use these for format with JSON and XML
+    respond_to do | format |
+      format.html # new.html.erb
+    
+    # format.xml {render :xml => @referral}
+    # format.json {render :json => @referral}
+  end
+  def create
+    
+    #create method at the current parameter of referral
+    @referral = Referral.new(params[:referral])
+    if @referral.save
+      #Email the referred user
+      UserMailer.user_referral_email(@referral, user_signup_url(@referral.invite_token)).deliver
+      
+      #deliver_at timestamp of delivery is here. Time.now is current time
+      @referral.update_attribute(:deliver_at, Time.now)
+      
+      #Uncomment for extra notification for user "Sent" and return to root
+      flash[:notice] = "Send."
+      #redirect_to root_url
+    else
+      render 'new'
+    end
+  end
+end
+end
+
+
+REFERRAL VIEW (NEW.HTML.ERB) 
+#Note: This form uses the simple_form gem
+
+<div class="container">
+	<p>Share your profile with your friends. </p>
+	<%= simple_form_for @referral, :html => {:class => 'form-inline'} do |f| %>
+		
+		<!--Here we use simple form gem to gather users first name and email for the referral-->
+		<% f.input :first_name %> <!--We can also supply other html tools between <> such as hints user (:hint => "RutherfordisCool" )-->
+		<% f.input :email %>
+		<% f.button :submit %>
+		<!--When this is submitted, first name and email will be in the database. This includes the date stamp when it was created.
+			This is a way to track when it is sent, but deliver_at is more accurate.-->
+	<% end %>
+</div>
+
+Question #2 – Implement the UserMailer
+
+#user_mailer.rb
+class UserMailer < ActionMailer::Base
+  
+  #Email 'from' is displayed. This can be placed here as defailt or 'from' in the mail(:to) line
+  default from: "noreply@sparktrades.com"
+
+  def user_referral_email(referral, user_signup_url)
+    
+    #Instanced variable accessible by our view from parameters
+    @greeting = "Hi" #Just a sample instanced variable for "Hi"
+    @referral = referral
+    @user_signup_url = user_signup_url
+    
+    #Recipients are from current referrals.
+    mail(:to => "#{referral.name} <#{referral.recipient_email}>", 
+    :subject => 'A friends would like to add you to their network')
+    
+    #Rails 2.0?
+    # body :referral => referral, :user_signup_url => user_signup_url
+  end
+end
+
+
+<!--[user_referral_email.html.erb]
+	This is the message view implementation!!!!
+	This can be sent in as HTML or normal text based which email server is used by the recipient, it is auto
+	selected for the recipient if it could not handle HTML-->
+
+<!--Greeting is Hi-->
+<p><%= @greeting %>,</p> 
+
+<!--Link to sign up URL with token. I am assuming default URL is set-->
+<p><%= @referral.name %></p>
+	<p>Please apply here <%= @user_signup_url %></p>
+
+Question #3 – Add a background process
+
+#!!!!I chose the longer coding to have more flexibility, but if we wanted to set priority, we can just replace mailer in the controller:
+#UserMailer.user_referral_email(@referral, user_signup_url(@referral.invite_token)).deliver
+#with:
+#UserMailer.delay(:priority => 3).user_referral_email(@referral, user_signup_url(@referral.invite_token))
+
+#If we just want to set priority lower, we can ignore the code below and use the above.
+#I am using delayed_jobs and its tools here
+#So it is currently in the referral controller. 
+#We want to make a separate class in lib to call a method (mail_recip.rb) in the background for the process
+
+#In controller sending email
+.
+.
+.
+  def create
+    
+    #create method at the current parameter of referral
+    @referral = Referral.new(params[:referral])
+    if @referral.save
+      
+      #Email the referred user
+      #Passing the object for more flexibility to take advantage of lowering priorty and other delay options
+      #Delays the job and sets priorty to 3; lower priority
+      Delayed::Job.enqueue (MailRecip.new(@referral, user_signup_url(@referral.invite_token)), 3)
+      
+      #Uncomment for extra notification for user "Sent" and return to root
+      flash[:notice] = "Send."
+      #redirect_to root_url
+    else
+      render 'new'
+    end
+  end
+  
+#mail_recip.rb
+#Has a Struct super class to include attributes. Also don't to set up the initialize method, and sets up the accessor
+#attributes referral and user_signup_url
+class MailRecip < Struct.new(:referral, :user_signup_url))
+	def perform
+	
+	#background perform mathod to deliver email to recipient
+		 UserMailer.user_referral_email(referral, user_signup_url).deliver
+	end
+end
+
